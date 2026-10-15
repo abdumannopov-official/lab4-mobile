@@ -1,0 +1,124 @@
+Question 1 — What a proper architecture gives you
+
+Simplicity (KISS):
+A 600-line MainActivity mixing network calls, JSON parsing, SharedPreferences, form validation, and UI updates violates the Single Responsibility Principle. It creates heavily coupled spaghetti code that is difficult to read, navigate, or modify safely.
+
+Testability:
+You cannot write fast local JVM unit tests for business logic like form validation or parsing because the code is tightly coupled to Android framework classes like SharedPreferences, Activity, and UI views.
+
+Low-cost maintenance:
+Any small change, such as modifying a JSON key or changing storage logic, carries a high risk of breaking unrelated UI or activity lifecycle code, making bug fixing and feature additions expensive and error-prone.
+
+Piece to move out first and why:
+Move the network call and JSON parsing (the data/API layer) out first.
+Reason: It has zero dependency on the Android UI framework and Activity lifecycle, making it the easiest component to isolate behind a repository interface and test independently.
+
+Question 2 — Starting from nothingFour-step plan for an existing app:
+
+Extract a clean Data Layer (Repository pattern): Isolate database, network, and preferences code into repository interfaces before attempting any presentation architectural pattern.
+
+Pick a single complex screen: Apply a modern pattern like MVVM or MVI to that single screen to evaluate its benefits.
+
+Refactor presentation logic incrementally: Move business logic out of Activities into ViewModels or Presenters screen by screen, avoiding a complete rewrite.
+
+Add unit tests for presentation logic: Write JVM unit tests for ViewModels or Presenters using fakes for the repository.
+
+The essential first step:
+Isolate and build a separate Data Layer (Repository/API) before picking any UI architecture pattern.   Why "use MVVM everywhere" is not a good answer:
+No single pattern fits every scenario. For simple static screens like an About screen, MVVM introduces unnecessary boilerplate. For screens with complex concurrent UI state transitions, MVI is often a better fit than MVVM. Applying MVVM universally ignores screen complexity and adds unnecessary maintenance overhead.
+
+
+Question 5 — MVC roles and the missing Controller
+
+Role assignment:
+1. Weather data class -> Model
+2. WeatherRepository -> Model
+3. WeatherScreen composable -> View
+4. onClick lambda in MainActivity calling repository and updating UI -> Controller and View
+5. FakeWeatherApi -> Model
+6. WeatherController -> Controller
+
+Analysis of Piece 4:
+Piece 4 acts as both the Controller (handling user actions and triggering data loading) and part of the View (updating the UI state directly). This dual role bloats the Activity with logic (Massive View Controller syndrome) and makes JVM unit testing impossible because business logic is tightly bound to the Android Activity framework.
+
+Sentence completion:
+The Model has no knowledge of the View[cite: 2].
+
+Question 7 — MVP rules: find the violations
+
+Rule Violations:
+
+    Line (A): Breaks Rule (1) — The View cannot access the Model. The WeatherActivity (View) directly calls repository.getWeather("Tashkent") instead of delegating data fetching to the Presenter.
+
+    Line (B): Breaks Rule (3) — The View is completely dumb and passive. The View contains presentation logic checking result.isSuccess to decide what text string to display.
+
+Testing Issues with Lines (C) and (D):
+Lines (C) and (D) respect Rule (2) (the Presenter is tied to a single View), but passing a concrete Android Activity reference into the WeatherPresenter tightly couples the Presenter to the Android framework. This prevents running fast local JVM unit tests without an emulator or heavy Robolectric mocks, and creates potential memory leaks during Activity recreation.
+
+Constructor rewrite:
+
+class WeatherPresenter(private val view: WeatherContract.View)
+
+
+Question 9 — The Presenter that outlives its View
+
+Experiment results and behavior:
+1. When rotating the device during a 3-second request, Android destroys the old MvpActivity instance and creates a new one with a new Presenter instance.
+2. The old Presenter continues its background coroutine call and eventually invokes showWeather() on the destroyed Activity instance (matching the old hash code in Logcat).
+3. Calling presenter.destroy() (which cancels the CoroutineScope) inside Activity.onDestroy() stops late callbacks from delivering results to dead View references.
+4. After rotation, the screen resets to "Pick a city"[cite: 2]. This happens because state was kept inside local Activity fields/Presenter scope, which do not survive Activity recreation without state preservation mechanisms (e.g., ViewModel or SavedInstanceState)[cite: 2].
+
+Question 10 — MVVM: where does each class live?
+Package mapping:
+WeatherApi -> data/api   FakeWeatherApi -> data/api   Weather -> data/model   WeatherRepository -> data/repository   WeatherModule -> di   WeatherViewModel -> presentation/viewmodel   WeatherUiState -> presentation/viewmodel   WeatherScreen -> presentation/view   MvvmActivity -> presentation/view   (a) Why ViewModel must not hold View references:
+Holding a reference to an Activity or composable causes memory leaks because View instances are recreated on configuration changes like screen rotation while the ViewModel survives. Instead of holding references, the ViewModel exposes observable streams of immutable state like StateFlow or LiveData that the View observes reactively.   (b) Concrete test enabled by loose coupling:
+You can write a fast JVM unit test for WeatherViewModel that asserts UI state transitions (Loading to Success or Error) upon selecting a city without needing any Android framework mocks, Activity lifecycle, or Compose UI rendering code.
+
+Question 11 — MVVM rotation experiment analysis
+
+Experiment result:
+When selecting Bukhara and rotating the device within 3 seconds, the request is NOT lost. After rotation, the screen continues showing "Loading…" and then seamlessly updates to "Bukhara: 27°C, Windy". This happens because ViewModel survives Activity recreation, maintaining the active coroutine and preserving state inside StateFlow[cite: 2].
+
+Question 12 — MVI principles: spot the violations
+
+Violations:
+Spot (1): Breaks Immutability and Single State. The ViewModel holds multiple separate mutable variables (city, isLoading, temperatureC, error) instead of a single immutable state object.
+Spot (2): Breaks Unidirectional Data Flow and Intent-driven actions. Modifying state properties directly via setters and helper methods inside event callbacks creates unpredictable multi-source state mutations instead of emitting a explicit Intent.
+Spot (3): Breaks Immutability. WeatherState uses mutable 'var' fields inside a data class, allowing external components to mutate state values in place.
+Spot (4): Breaks Separation of Concerns. The View/Activity mutates the ViewModel state directly (viewModel.isLoading = true) instead of sending an Intent to the ViewModel.
+
+Declarations:
+data class WeatherState(
+    val isLoading: Boolean = false,
+    val weather: Weather? = null,
+    val error: String? = null
+)
+
+sealed interface WeatherIntent {
+    data class SelectCity(val city: String) : WeatherIntent
+    data object DismissError : WeatherIntent
+}
+
+class WeatherMviViewModel : ViewModel() {
+    fun onIntent(intent: WeatherIntent) {}
+}
+
+Question 14 — What does each pattern depend on? (HANDS-ON & ANALYSIS)Search and Dependency Analysis:Pattern: MVCLogic class: WeatherControllerImports android.: No
+Imports androidx.: NoView holds reference to: WeatherController and WeatherModelSurvives rotation: No (Model and Controller states are lost)Pattern: MVPLogic class: WeatherPresenterImports android.: No
+Imports androidx.: NoView holds reference to: WeatherPresenterSurvives rotation: No (Presenter and view state are lost)Pattern: MVVMLogic class: WeatherViewModelImports android.: No
+Imports androidx.: Yes (androidx.lifecycle)View holds reference to: WeatherViewModelSurvives rotation: Yes (ViewModel survives activity recreation)Pattern: MVILogic class: WeatherMviViewModelImports android.: No
+Imports androidx.: Yes (androidx.lifecycle)View holds reference to: WeatherMviViewModelSurvives rotation: Yes (ViewModel survives activity recreation)Sentence on Unit Testing and Coroutines per pattern:MVC: WeatherController tests run on the local JVM with no extra test libraries because it uses a standard CoroutineScope.   MVP: WeatherPresenter tests run on the local JVM with no extra test libraries by passing Dispatchers.Unconfined to the scope.   MVVM: WeatherViewModel tests require kotlinx-coroutines-test (Dispatchers.setMain and resetMain) because viewModelScope relies on Dispatchers.Main.   MVI: WeatherMviViewModel tests require kotlinx-coroutines-test (Dispatchers.setMain and resetMain) because viewModelScope relies on Dispatchers.Main.
+
+Question 15 — Choose a pattern (THEORETICAL)
+Situation 1: An About screen with two static texts.
+Chosen pattern: No pattern, only a basic layout / View.
+Lecture justification: No single pattern suits every project; forcing architecture onto simple static screens creates unnecessary boilerplate.
+Cost: None.   Situation 2: A chat screen with a message list, typing indicator, and connection status changing simultaneously.
+Chosen pattern: MVI (Model-View-Intent).
+Lecture justification: MVI handles complex, highly concurrent UI states by merging multiple state channels into a single immutable state updated via explicit intents.
+Cost: Higher initial setup complexity and boilerplate (defining Intents, State data classes, and Reducers).   Situation 3: A five-year-old app with 40 Activities reading the database directly, two developers, and a release in one month.
+Chosen pattern: Refactor the Data Layer first (Repository pattern) without changing the UI architecture.
+Lecture justification: Any architectural refactoring must start by isolating a clean Data Layer before touching presentation patterns.
+Cost: Technical debt remains in the Activity presentation layer, but deadline and application stability are preserved.   Can situations (1) and (2) live in the same app with different structures?
+Yes, situation 1 and situation 2 can coexist within the same application.
+Lecture support statement: Inside one complex project, each module or feature can have its own appropriate architectural structure based on its needs.
